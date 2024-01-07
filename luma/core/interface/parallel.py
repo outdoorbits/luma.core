@@ -47,12 +47,16 @@ class bitbang_6800(object):
     def __init__(self, gpio=None, pulse_time=PULSE_TIME, **kwargs):
         self._managed = gpio is None
         self._gpio = gpio or self.__rpi_gpio__()
-        self._gpio.setwarnings(False)
         self._pulse_time = pulse_time
 
-        self._RS = self._configure(kwargs.get("RS", 22))
-        self._E = self._configure(kwargs.get("E", 17))
-        self._PINS = self._configure(kwargs.get('PINS', [25, 24, 23, 18]))
+        self._RS = self._gpio(kwargs.get("RS", 22))
+        self._E = self._gpio(kwargs.get("E", 17))
+
+        data_pins = kwargs.get('PINS', [25, 24, 23, 18])
+        data_pins = data_pins if type(data_pins) is list else [data_pins] if data_pins else []
+        self._PINS    = []
+        for data_pin in data_pins:
+            self._PINS.append(self._gpio(data_pin))
 
         self._datalines = len(self._PINS)
         assert self._datalines in (4, 8), f'You\'ve provided {len(self._PINS)} pins but a bus must contain either four or eight pins'
@@ -61,11 +65,7 @@ class bitbang_6800(object):
         self._cmd_mode = self._gpio.LOW  # Command mode = Hold low
         self._data_mode = self._gpio.HIGH  # Data mode = Pull high
 
-    def _configure(self, pin):
-        pins = pin if type(pin) is list else [pin] if pin else []
-        for p in pins:
-            self._gpio.setup(p, self._gpio.OUT)
-        return pin
+
 
     def command(self, *cmd):
         """
@@ -101,18 +101,27 @@ class bitbang_6800(object):
 
     def _write(self, data, mode):
         gpio = self._gpio
-        gpio.output(self._RS, mode)
-        gpio.output(self._E, gpio.LOW)
+        self._RS.set_status(mode)
+        self._E.off()
         for value in data:
             for i in range(self._datalines):
-                gpio.output(self._PINS[i], (value >> i) & 0x01)
-            gpio.output(self._E, gpio.HIGH)
+                self._PINS[i].set_status((value >> i) & 0x01)
+            self._E.on()
             sleep(self._pulse_time)
-            gpio.output(self._E, gpio.LOW)
+            self._E.off()
 
     def cleanup(self):
         """
         Clean up GPIO resources.
         """
         if self._managed:
-            self._gpio.cleanup([self._RS, self._E, *self._PINS])
+            self._RS.off()
+            del self._RS
+
+            self._E.off()
+            del self._E
+
+        for PIN in self._PINS:
+            PIN.off()
+        del self._PINS
+

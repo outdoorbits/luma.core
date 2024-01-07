@@ -40,10 +40,10 @@ class i2c(object):
         denied.
 
     .. note::
-       1. Only one of ``bus`` OR ``port`` arguments should be supplied;
-          if both are, then ``bus`` takes precedence.
-       2. If ``bus`` is provided, there is an implicit expectation
-          that it has already been opened.
+    1. Only one of ``bus`` OR ``port`` arguments should be supplied;
+        if both are, then ``bus`` takes precedence.
+    2. If ``bus`` is provided, there is an implicit expectation
+        that it has already been opened.
     """
     def __init__(self, bus=None, port=1, address=0x3C):
         self._cmd_mode = 0x00
@@ -91,7 +91,7 @@ class i2c(object):
 
         try:
             self._bus.write_i2c_block_data(self._addr, self._cmd_mode,
-                                           list(cmd))
+                                        list(cmd))
         except (IOError, OSError) as e:
             if e.errno in [errno.EREMOTEIO, errno.EIO]:
                 # I/O error
@@ -183,25 +183,23 @@ class bitbang(object):
         self._transfer_size = transfer_size
         self._managed = gpio is None
         self._gpio = gpio or self.__rpi_gpio__()
+        print(f'kwargs.get("SCLK"):{ kwargs.get("SCLK",11)}')
+        self._SCLK = self._gpio(kwargs.get("SCLK",11))
+        self._SDA = self._gpio(kwargs.get("SDA",10))
+        self._CE = self._gpio(kwargs.get("CE",8))
+        self._DC = self._gpio(kwargs.get("DC",24))
+        self._RST = self._gpio(kwargs.get("RST",25))
 
-        self._SCLK = self._configure(kwargs.get("SCLK"))
-        self._SDA = self._configure(kwargs.get("SDA"))
-        self._CE = self._configure(kwargs.get("CE"))
-        self._DC = self._configure(kwargs.get("DC"))
-        self._RST = self._configure(kwargs.get("RST"))
         self._cmd_mode = self._gpio.LOW  # Command mode = Hold low
         self._data_mode = self._gpio.HIGH  # Data mode = Pull high
 
         if self._RST is not None:
-            self._gpio.output(self._RST, self._gpio.LOW)  # Reset device
+            self._RST.off()  # Reset device
             sleep(reset_hold_time)
-            self._gpio.output(self._RST, self._gpio.HIGH)  # Keep RESET pulled high
+            self._RST.on()  # Keep RESET pulled high
             sleep(reset_release_time)
 
-    def _configure(self, pin):
-        if pin is not None:
-            self._gpio.setup(pin, self._gpio.OUT)
-            return pin
+
 
     def command(self, *cmd):
         """
@@ -211,7 +209,7 @@ class bitbang(object):
         :type cmd: int
         """
         if self._DC:
-            self._gpio.output(self._DC, self._cmd_mode)
+            self._DC.set_status(self._cmd_mode)
 
         self._write_bytes(list(cmd))
 
@@ -224,7 +222,7 @@ class bitbang(object):
         :type data: list, bytearray
         """
         if self._DC:
-            self._gpio.output(self._DC, self._data_mode)
+            self._DC.set_status(self._data_mode)
 
         i = 0
         n = len(data)
@@ -236,24 +234,26 @@ class bitbang(object):
     def _write_bytes(self, data):
         gpio = self._gpio
         if self._CE:
-            gpio.output(self._CE, gpio.LOW)  # Active low
+            self._CE.off()  # Active low
 
         for byte in data:
             for _ in range(8):
-                gpio.output(self._SDA, byte & 0x80)
-                gpio.output(self._SCLK, gpio.HIGH)
+                self._SDA.set_status(byte & 0x80)
+                self._SCLK.on()
                 byte <<= 1
-                gpio.output(self._SCLK, gpio.LOW)
+                self._SCLK.off()
 
         if self._CE:
-            gpio.output(self._CE, gpio.HIGH)
+            self._CE.on()
 
     def cleanup(self):
         """
         Clean up GPIO resources if managed.
         """
         if self._managed:
-            self._gpio.cleanup([pin for pin in [self._SCLK, self._SDA, self._CE, self._DC, self._RST] if pin is not None])
+            for pin in [self._SCLK, self._SDA, self._CE, self._DC, self._RST]:
+                pin.off()
+                del pin
 
 
 @lib.spidev
@@ -294,9 +294,9 @@ class spi(bitbang):
     :raises luma.core.error.UnsupportedPlatform: GPIO access not available.
     """
     def __init__(self, spi=None, gpio=None, port=0, device=0,
-                 bus_speed_hz=8000000, transfer_size=4096,
-                 gpio_DC=24, gpio_RST=25, spi_mode=None,
-                 reset_hold_time=0, reset_release_time=0, **kwargs):
+                bus_speed_hz=8000000, transfer_size=4096,
+                gpio_DC=24, gpio_RST=25, spi_mode=None,
+                reset_hold_time=0, reset_release_time=0, **kwargs):
         assert bus_speed_hz in [mhz * 1000000 for mhz in [0.5, 1, 2, 4, 8, 16, 20, 24, 28, 32, 36, 40, 44, 48, 50, 52]]
 
         bitbang.__init__(self, gpio, transfer_size, reset_hold_time, reset_release_time, DC=gpio_DC, RST=gpio_RST)
@@ -349,23 +349,31 @@ class gpio_cs_spi(spi):
             self._gpio_CS = gpio_CS
             self._cs_high = cs_high
             self._spi.no_cs = True  # disable spidev's handling of the chip select pin
-            self._gpio.setup(self._gpio_CS, self._gpio.OUT, initial=self._gpio.LOW if self._cs_high else self._gpio.HIGH)
+            self._gpio_CS = self._gpio(self._gpio_CS, initial_value=self._gpio.LOW if self._cs_high else self._gpio.HIGH)
 
     def _write_bytes(self, *args, **kwargs):
         if self._gpio_CS:
-            self._gpio.output(self._gpio_CS, self._gpio.HIGH if self._cs_high else self._gpio.LOW)
+            if self._cs_high:
+                self._gpio_CS.on()
+            else:
+                self._gpio_CS.off()
 
         super(gpio_cs_spi, self)._write_bytes(*args, **kwargs)
 
+
         if self._gpio_CS:
-            self._gpio.output(self._gpio_CS, self._gpio.LOW if self._cs_high else self._gpio.HIGH)
+            if self._cs_high:
+                self._gpio_CS.off()
+            else:
+                self._gpio_CS.on()
 
     def cleanup(self):
         """
         Close pin if it was set up.
         """
         if self._gpio_CS is not None:
-            self._gpio.cleanup(self._gpio_CS)
+            self._gpio_CS.off()
+            del self._gpio_CS
         super(gpio_cs_spi, self).cleanup()
 
 
@@ -575,53 +583,53 @@ class pcf8574(i2c):
         denied.
 
     .. note::
-       1. Only one of ``bus`` OR ``port`` arguments should be supplied;
-          if both are, then ``bus`` takes precedence.
-       2. If ``bus`` is provided, there is an implicit expectation
-          that it has already been opened.
-       3. Default wiring:
+    1. Only one of ``bus`` OR ``port`` arguments should be supplied;
+        if both are, then ``bus`` takes precedence.
+    2. If ``bus`` is provided, there is an implicit expectation
+        that it has already been opened.
+    3. Default wiring:
 
-       * RS - Register Select
-       * E - Enable
-       * RW - Read/Write (note: unused by this driver)
-       * D4-D7 - The upper data pins
+    * RS - Register Select
+    * E - Enable
+    * RW - Read/Write (note: unused by this driver)
+    * D4-D7 - The upper data pins
 
-       ========= === === === === === === === =========
-       Device     RS  RW   E  D4  D5  D6  D7 BACKLIGHT
-       Display     4   5   6  11  12  13  14
-       Backpack   P0  P1  P2  P4  P5  P6  P7        P3
-       ========= === === === === === === === =========
+    ========= === === === === === === === =========
+    Device     RS  RW   E  D4  D5  D6  D7 BACKLIGHT
+    Display     4   5   6  11  12  13  14
+    Backpack   P0  P1  P2  P4  P5  P6  P7        P3
+    ========= === === === === === === === =========
 
-       If your PCF8574 is wired up differently to this you will need to provide
-       the correct values for the RS, E, COMMAND, BACKLIGHT parameters.
-       RS, E and BACKLIGHT are set to the pin numbers of the backpack pins
-       they are connect to from P0-P7.
+    If your PCF8574 is wired up differently to this you will need to provide
+    the correct values for the RS, E, COMMAND, BACKLIGHT parameters.
+    RS, E and BACKLIGHT are set to the pin numbers of the backpack pins
+    they are connect to from P0-P7.
 
-       COMMAND is set to 'high' if the Register Select (RS) pin needs to be high
-       to inform the device that a command byte is being sent or 'low' if RS low
-       is used for commands.
+    COMMAND is set to 'high' if the Register Select (RS) pin needs to be high
+    to inform the device that a command byte is being sent or 'low' if RS low
+    is used for commands.
 
-       PINS is a list of the pin positions that match where the devices data
-       pins have been connected on the backpack (P0-P7).  For many devices this
-       will be d4->P4, d5->P5, d6->P6, and d7->P7 ([4, 5, 6, 7]) which is the
-       default.
+    PINS is a list of the pin positions that match where the devices data
+    pins have been connected on the backpack (P0-P7).  For many devices this
+    will be d4->P4, d5->P5, d6->P6, and d7->P7 ([4, 5, 6, 7]) which is the
+    default.
 
-       Example:
+    Example:
 
-       If your data lines D4-D7 are connected to the PCF8574s pins P0-P3 with
-       the RS pin connected to P4, the enable pin to P5, the backlight pin
-       connected to P7, and the RS value to indicate command is low, your
-       initialization would look something like:
+    If your data lines D4-D7 are connected to the PCF8574s pins P0-P3 with
+    the RS pin connected to P4, the enable pin to P5, the backlight pin
+    connected to P7, and the RS value to indicate command is low, your
+    initialization would look something like:
 
-       ``pcf8574(port=1, address=0x27, PINS=[0, 1, 2, 3], RS=4, E=5,
-       COMMAND='low', BACKLIGHT=7)``
+    ``pcf8574(port=1, address=0x27, PINS=[0, 1, 2, 3], RS=4, E=5,
+    COMMAND='low', BACKLIGHT=7)``
 
-       Explanation:
-       PINS are set to ``[0, 1, 2, 3]`` which assigns P0 to D4, P1 to D5, P2 to D6,
-       and P3 to D7.  RS is set to 4 to associate with P4. Similarly E is set
-       to 5 to associate E with P5.  BACKLIGHT set to 7 connects it to pin P7
-       of the backpack.  COMMAND is set to ``low`` so that RS will be set to low
-       when a command is sent and high when data is sent.
+    Explanation:
+    PINS are set to ``[0, 1, 2, 3]`` which assigns P0 to D4, P1 to D5, P2 to D6,
+    and P3 to D7.  RS is set to 4 to associate with P4. Similarly E is set
+    to 5 to associate E with P5.  BACKLIGHT set to 7 connects it to pin P7
+    of the backpack.  COMMAND is set to ``low`` so that RS will be set to low
+    when a command is sent and high when data is sent.
 
     .. versionadded:: 1.15.0
     """
@@ -670,8 +678,8 @@ class pcf8574(i2c):
 
             For example, to send this using the pcf8574 interface::
 
-              d = pcf8574(bus=1, address=0x27)
-              d.command([0x08, 0x00])
+            d = pcf8574(bus=1, address=0x27)
+            d.command([0x08, 0x00])
         """
         self._write(list(cmd), self._cmd_mode)
 
@@ -693,8 +701,8 @@ class pcf8574(i2c):
 
             For example, to send this using the pcf8574 interface::
 
-              d = pcf8574(bus=1, address=0x27)
-              d.command([0x04, 0x01])
+            d = pcf8574(bus=1, address=0x27)
+            d.command([0x04, 0x01])
         """
         self._write(data, self._data_mode)
 
